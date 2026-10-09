@@ -6,7 +6,7 @@
 
 ## 中文
 
-给 DeepSeek Harness（桌面版 / Web 版）加一个**会话永久删除**动作。
+给 DeepSeek Harness Desktop加一个**会话永久删除**动作。
 
 DSH 只提供「归档」：会话日志是 append-only 的，`dsh-session-persistence`
 没有任何删除方法，`dsh-workspace` 注册表也没有 `removeSession`。这个插件把
