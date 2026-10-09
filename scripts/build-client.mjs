@@ -58,14 +58,20 @@ function buildBundle(body) {
  *
  * Assembled from ../src/client.js by ../scripts/build-client.mjs, which owns the
  * lazy-CJS loader boilerplate below. Edit the source and re-run the script.
+ *
+ * The factory is called with \`require\` and NOTHING else — the runtime invokes
+ * \`factory(this.makeRequire(ownerId, edges))\` — so it builds its own module
+ * object here, exactly like every bundled DSH client plugin.
  */
 window.__ModuleLoader__.load({
   id: '${PLUGIN_ID}',
-  factory: (require, module) => {
+  factory: (require) => {
+    const module = { exports: {} };
     const exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 
 ${indented}
+    return module.exports;
   },
 });
 `;

@@ -126,18 +126,25 @@ check('the authored source uses LF endings only',
   !readFileSync(join(root, 'src', 'client.js'), 'utf8').includes('\r'));
 
 /**
- * Materialize the registered factory the way the loader does: one fresh module
- * object per plugin, resolved externals, execution only on this call.
+ * Materialize the registered factory exactly as the runtime does.
+ *
+ * `dsh-client-modules` invokes `factory(this.makeRequire(ownerId, edges))` — the
+ * require function and NOTHING else. Passing a second `module` argument here
+ * would hide the only failure mode this test exists to catch: a factory that
+ * expects the runtime to hand it a module object throws on an undefined
+ * `module.exports`, which crashes the whole web boot for the user.
  * @returns the plugin's exports.
  */
 function materialize() {
-  const module = { exports: {} };
-  const value = loaded.factory((specifier) => {
+  return loaded.factory((specifier) => {
     if (!(specifier in modules)) throw new Error(`client bundle requested unknown module ${specifier}`);
     return modules[specifier];
-  }, module);
-  return value ?? module.exports;
+  });
 }
+
+check('the factory is declared with exactly one parameter',
+  loaded.factory.length === 1,
+  `${String(loaded.factory.length)} parameters`);
 
 const exports = materialize();
 check('bundle exports apply()', typeof exports.apply === 'function');

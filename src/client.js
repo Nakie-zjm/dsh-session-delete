@@ -11,10 +11,20 @@
  * The Host drops the row from every open Session list by emitting
  * `api-session/removed`, so this half owns no Session-list state of its own.
  *
- * This file is the AUTHORED half. `scripts/build-client.mjs` wraps it into the
- * lazy-CJS factory DSH serves as `lib/client.js`: the loader owns the module
- * object, the platform seed table answers `require`, and the whole body stays
- * inside the factory closure so nothing runs until the plugin is materialized.
+ * This file is a factory BODY, not a module. `scripts/build-client.mjs` wraps it
+ * into the lazy-CJS factory DSH serves as `lib/client.js`, which supplies the
+ * three names it binds — `require`, `exports` and `module` — using the same
+ * self-contained shape every DSH client bundle uses:
+ *
+ *     window.__ModuleLoader__.load({ id, factory: (require) => {
+ *       const module = { exports: {} }; const exports = module.exports;
+ *       <this body>
+ *       return module.exports;
+ *     } })
+ *
+ * The loader calls the factory with `require` ALONE (`factory(this.makeRequire(…))`
+ * in dsh-client-modules), so the module object has to be created in here; a
+ * factory that expects the runtime to hand it one throws on undefined `module`.
  * @module dsh-session-delete/src/client
  */
 

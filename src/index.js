@@ -637,22 +637,34 @@ export const inject = ['connection'];
 
 /**
  * Register the authenticated browser route.
+ *
+ * This runs inside the plugin's own fiber, and a throw here fails the fiber —
+ * which the Web boot audit treats as a blocked boot, so a working Harness would
+ * refuse to start until the operator disables third-party plugins. The route is
+ * the ONLY thing this half adds at mount time, so the whole body is guarded:
+ * a deployment that lacks the seam loses the menu's Host call and logs why,
+ * rather than taking the application down with it.
  * @param ctx - the host context carrying the Connection route registry.
  */
 export function apply(ctx) {
-  const connection = Reflect.get(ctx, 'connection');
-  if (connection === undefined || connection === null || typeof connection.fetch?.register !== 'function') {
-    ctx.logger.warn('session-delete: the Connection fetch route registry is unavailable; the delete route is not registered');
-    return;
+  try {
+    const connection = typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
+    const register = connection?.fetch?.register;
+    if (typeof register !== 'function') {
+      ctx.logger.warn('session-delete: the Connection fetch route registry is unavailable; the delete route is not registered');
+      return;
+    }
+    // `register` binds the route to this fiber's effect itself, so it is not
+    // wrapped again: the returned disposer belongs to that same effect.
+    register.call(connection.fetch, {
+      path: SESSION_DELETE_PATH,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) => sessionDeleteResponse(ctx, request),
+    });
+  } catch (error) {
+    ctx.logger.error(`session-delete: registering the delete route failed; the route is not registered: ${messageOf(error)}`);
   }
-  // `register` already binds the route to this fiber's effect, so it is not
-  // wrapped again: the returned disposer belongs to that same effect.
-  connection.fetch.register({
-    path: SESSION_DELETE_PATH,
-    methods: ['POST'],
-    requestBody: 'buffered',
-    fetch: (request) => sessionDeleteResponse(ctx, request),
-  });
 }
 
 export { PROJ_CACHE_ROOT, SESSIONS_ROOT, encodeSegment, projectKey, sessionDirOf };

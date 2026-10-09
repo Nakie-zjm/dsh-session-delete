@@ -398,6 +398,93 @@ const BROWSER_ORIGIN = 'http://127.0.0.1:19387';
     `HTTP ${String(running.status)} ${String(runningBody.error?.code)}`);
 }
 
+// ── 6. the plugin face: apply() must never throw ──────────────────────────
+
+/**
+ * A host context that behaves like a hostile Cordis scope: reading an
+ * undeclared property throws, `get` answers only the named services, and the
+ * logger records instead of printing.
+ * @param options - what the fake composition provides.
+ * @param options.connection - the Connection service value, or undefined.
+ * @param options.getThrows - make `ctx.get` itself throw.
+ * @returns the context and the recorded log lines.
+ */
+function makeApplyContext(options = {}) {
+  const log = [];
+  const target = {
+    ...(options.getThrows === true
+      ? { get: () => { throw new Error('service access denied'); } }
+      : { get: (key) => (key === 'connection' ? options.connection : undefined) }),
+    logger: {
+      info: () => {},
+      warn: (message) => log.push(`warn ${String(message)}`),
+      error: (message) => log.push(`error ${String(message)}`),
+    },
+  };
+  const ctx = new Proxy(target, {
+    get(object, property) {
+      if (!(property in object)) throw new Error(`cannot read undeclared context member ${String(property)}`);
+      return Reflect.get(object, property);
+    },
+  });
+  return { ctx, log };
+}
+
+{
+  const registered = [];
+  const { ctx, log } = makeApplyContext({
+    connection: { fetch: { register: (route) => { registered.push(route); return () => {}; } } },
+  });
+  plugin.apply(ctx);
+  check('apply registers exactly one POST route',
+    registered.length === 1 && registered[0].path === plugin.SESSION_DELETE_PATH && registered[0].methods.join() === 'POST',
+    JSON.stringify(registered.map((route) => route.path)));
+  check('apply leaves nothing logged when it succeeds', log.length === 0, JSON.stringify(log));
+}
+
+{
+  // A composition without the Connection seam must degrade, not fail: a throw
+  // inside the plugin fiber fails the whole Web boot and the operator has to
+  // disable third-party plugins to start Harness again.
+  const { ctx, log } = makeApplyContext({});
+  let threw;
+  try {
+    plugin.apply(ctx);
+  } catch (error) {
+    threw = error;
+  }
+  check('apply survives a missing Connection service', threw === undefined, String(threw?.message));
+  check('apply reports the missing seam', log.some((line) => line.startsWith('warn')), JSON.stringify(log));
+}
+
+{
+  const { ctx, log } = makeApplyContext({ getThrows: true });
+  let threw;
+  try {
+    plugin.apply(ctx);
+  } catch (error) {
+    threw = error;
+  }
+  check('apply survives a service read that throws', threw === undefined, String(threw?.message));
+  check('apply reports the failed read', log.some((line) => line.startsWith('error')), JSON.stringify(log));
+}
+
+{
+  const { ctx, log } = makeApplyContext({
+    connection: { fetch: { register: () => { throw new Error('route path already registered'); } } },
+  });
+  let threw;
+  try {
+    plugin.apply(ctx);
+  } catch (error) {
+    threw = error;
+  }
+  check('apply survives a rejected route registration', threw === undefined, String(threw?.message));
+  check('apply reports the rejected registration',
+    log.some((line) => line.includes('route is not registered')),
+    JSON.stringify(log));
+}
+
 rmSync(home, { recursive: true, force: true });
 
 const failed = checks.filter((entry) => !entry.ok);
