@@ -1,0 +1,12 @@
+# Dependencies — the package has none; `npm install` is only for tooling.
+node_modules/
+
+# Build/verification output that never belongs in the repository.
+*.tgz
+.artifacts/
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

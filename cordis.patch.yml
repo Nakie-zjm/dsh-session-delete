@@ -1,0 +1,11 @@
+# The dsh-session-delete bundle patch: the delete action and its Host route.
+#
+# One row: the package is dual-face, so this single Loader entry carries both
+# the Host half (the `/api/session.delete` route and the delete orchestration)
+# and the `dsh.client` declaration the modules node half scans into the browser
+# boot graph. Rows here are appended after every bundle layer, and the profile's
+# own cordis.patch.yml still comes later, so a profile can disable or reconfigure
+# this row by id.
+- insert:
+    - id: session-delete
+      name: dsh-session-delete

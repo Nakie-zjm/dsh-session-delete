@@ -1,0 +1,10 @@
+# One line-ending policy for every checkout, because the generated bundle is
+# verified byte-for-byte: `npm run build:check` compares `lib/client.js` against
+# what `scripts/build-client.mjs` produces, and that comparison must hold on
+# Windows and on CI alike. A CRLF checkout would silently break it.
+* text=auto eol=lf
+
+# Binary or generated-and-exact files.
+*.png binary
+*.ico binary
+*.tgz binary

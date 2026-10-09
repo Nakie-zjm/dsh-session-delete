@@ -1,0 +1,62 @@
+{
+  "name": "@nakie-zjm/dsh-session-delete",
+  "version": "0.1.0",
+  "description": "Permanent session delete for DeepSeek Harness: one sidebar menu action that removes the Session log and projection cache and unaccounts it from its Workspace",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "session-delete",
+    "permanent-delete",
+    "conversation",
+    "privacy"
+  ],
+  "license": "MIT",
+  "author": "zhengjiaming",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nakie-zjm/dsh-session-delete.git"
+  },
+  "homepage": "https://github.com/Nakie-zjm/dsh-session-delete#readme",
+  "bugs": {
+    "url": "https://github.com/Nakie-zjm/dsh-session-delete/issues"
+  },
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/index.js",
+    "src/client.js",
+    "lib/client.js",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "build:check": "node scripts/build-client.mjs --check",
+    "test": "node test/host-half.mjs && node test/browser-half.mjs",
+    "verify": "node test/verify-endpoint.mjs",
+    "check": "npm run build:check && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  }
+}

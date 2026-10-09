@@ -1,0 +1,40 @@
+# Publish to npm from a version tag.
+#
+# The published artifact is built here, not committed blindly: `npm run check`
+# rebuilds `lib/client.js` and verifies it equals what the repository holds
+# (`build:check`), then runs both test halves. A stale generated bundle therefore
+# fails the release instead of shipping.
+#
+# Setup: add an npm automation token as the `NPM_TOKEN` repository secret.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify the generated bundle is current
+        run: npm run build:check
+
+      - name: Test
+        run: npm test
+
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
