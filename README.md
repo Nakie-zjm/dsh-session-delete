@@ -171,10 +171,16 @@ dsh-session-delete/
 
 ```sh
 npm run build     # 生成 lib/client.js
-npm test          # 宿主半 43 项 + 浏览器半 35 项
+npm test          # 宿主半 51 项 + 浏览器半 46 项
 npm run verify    # 对运行中的 DSH 实例核对（需应用在跑）
 npm run check     # build:check + test，prepublishOnly 会自动跑
 ```
+
+`npm run verify` 不依赖任何机器相关的写死路径：harness home 走 `DSH_HOME`（默认
+`~/.dsh`）经插件自己的解析器，base URL 依次取命令行参数、`DSH_WEB_URL`、
+再依次探测 19387 / 3000 / 8080 / 8000 / 5173。它只能确认「根目录存在 + 有 DSH 宿主
+在跑」；**无法判断路由是否挂载**——未认证请求会被信任栅栏统一挡成 401，无论路由
+在不在。要判定挂载，请用它在 Web UI 控制台里打印的那条已认证 fetch。
 
 本包**没有任何运行时依赖**：客户端只用平台种子模块表里的
 `react`、`react/jsx-runtime`、`@deepseek-ai/dsh-client-store`、

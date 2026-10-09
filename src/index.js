@@ -667,4 +667,4 @@ export function apply(ctx) {
   }
 }
 
-export { PROJ_CACHE_ROOT, SESSIONS_ROOT, encodeSegment, projectKey, sessionDirOf };
+export { PROJ_CACHE_ROOT, SESSIONS_ROOT, SESSION_ID_PATTERN, encodeSegment, projectKey, sessionDirOf };
