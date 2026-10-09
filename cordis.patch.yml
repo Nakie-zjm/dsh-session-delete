@@ -1,4 +1,4 @@
-# The dsh-session-delete bundle patch: the delete action and its Host route.
+# The @nakie-zjm/dsh-session-delete bundle patch: the delete action and its Host route.
 #
 # One row: the package is dual-face, so this single Loader entry carries both
 # the Host half (the `/api/session.delete` route and the delete orchestration)
@@ -6,6 +6,10 @@
 # boot graph. Rows here are appended after every bundle layer, and the profile's
 # own cordis.patch.yml still comes later, so a profile can disable or reconfigure
 # this row by id.
+#
+# `name` must be the exact package name (`dsh.bundle.patch` is only reachable
+# through a resolvable specifier). A stale name fails silently in the UI: the
+# Loader reports it on stderr and the bundle simply never mounts.
 - insert:
     - id: session-delete
-      name: dsh-session-delete
+      name: '@nakie-zjm/dsh-session-delete'

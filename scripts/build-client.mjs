@@ -74,6 +74,33 @@ ${indented}
 const source = readFileSync(sourcePath, 'utf8');
 const bundle = buildBundle(source);
 
+/**
+ * Check that the bundle patch mounts the package under its own name.
+ *
+ * A Loader row whose `name` is not the package name fails silently in the UI:
+ * the bundle never mounts, the `dsh.client` declaration is never scanned, and
+ * the only evidence is one line on the host's stderr. That is exactly how a
+ * rename leaves a healthy-looking profile with no menu entry, so it is checked
+ * here rather than discovered by a user.
+ * @throws {Error} when a patch row names something other than this package.
+ */
+function assertBundlePatchNames() {
+  const patchPath = join(root, 'cordis.patch.yml');
+  const problems = [];
+  for (const [index, line] of readFileSync(patchPath, 'utf8').split('\n').entries()) {
+    const match = /^\s*-?\s*name:\s*(?<name>.*?)\s*$/u.exec(line);
+    if (match === null) continue;
+    const rowName = match.groups.name.replace(/^['"]|['"]$/gu, '');
+    if (rowName === '') continue;
+    // A row may name this package, or a cordis builtin/file address.
+    if (rowName === PLUGIN_ID || rowName.startsWith('cordis:') || rowName.startsWith('.')) continue;
+    problems.push(`${patchPath}:${String(index + 1)} mounts ${JSON.stringify(rowName)} but this package is ${JSON.stringify(PLUGIN_ID)}`);
+  }
+  if (problems.length > 0) throw new Error(`bundle patch name mismatch:\n  ${problems.join('\n  ')}`);
+}
+
+assertBundlePatchNames();
+
 if (process.argv.includes('--check')) {
   let current;
   try {
