@@ -420,6 +420,22 @@ check('the dialog renders nothing while no request is pending',
 
 // ── teardown ───────────────────────────────────────────────────────────────
 
+{
+  // Disposing the mount must abort a delete still in flight; otherwise a
+  // plugin that is gone keeps a request (and its response handler) alive.
+  let aborted = false;
+  globalThis.fetch = (url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => {
+      aborted = true;
+      reject(new Error('aborted'));
+    });
+  });
+  const pending = requestDelete('pending-session');
+  for (const cleanup of cleanups) if (typeof cleanup === 'function') await cleanup();
+  await pending;
+  check('disposing the mount aborts an in-flight request', aborted === true);
+}
+
 for (const cleanup of cleanups) if (typeof cleanup === 'function') await cleanup();
 check('mounting installed a disposal hook for in-flight requests', cleanups.some((entry) => typeof entry === 'function'));
 
