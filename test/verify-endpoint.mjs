@@ -86,7 +86,8 @@ async function probe(origin) {
 /**
  * Resolve the base URL to check: the caller's argument, then `DSH_WEB_URL`,
  * then a probe of the ports a DSH host is likely bound to.
- * @returns the base URL, or undefined when no host answered.
+ * @returns the base URL (or undefined when no host answered) and the named URL
+ *   the caller gave, so a failure can say which of the two happened.
  */
 async function resolveBaseUrl() {
   const named = baseUrlArgument ?? process.env['DSH_WEB_URL'];
@@ -95,20 +96,20 @@ async function resolveBaseUrl() {
     const answer = await probe(origin);
     if (answer?.error !== undefined) {
       check('the named base URL answers', false, `${origin}: ${answer.error}`);
-      return undefined;
+      return { origin: undefined, named: origin };
     }
     console.log(`host: ${origin} (given)`);
-    return origin;
+    return { origin, named: origin };
   }
   for (const port of CANDIDATE_PORTS) {
     const origin = `http://127.0.0.1:${String(port)}`;
     const answer = await probe(origin);
     if (answer?.error === undefined) {
       console.log(`host: ${origin} (discovered)`);
-      return origin;
+      return { origin };
     }
   }
-  return undefined;
+  return {};
 }
 
 console.log('harness home roots');
@@ -135,14 +136,21 @@ if (sessionIdArgument !== undefined) {
   }
 }
 
-const baseUrl = await resolveBaseUrl();
+const { origin: baseUrl, named: namedBaseUrl } = await resolveBaseUrl();
 if (baseUrl === undefined) {
-  check('a DSH host answers on a probed port', false, `tried ${CANDIDATE_PORTS.join(', ')}; pass a base URL or set DSH_WEB_URL`);
+  check('a DSH host answers', false, namedBaseUrl === undefined
+    ? `tried ${CANDIDATE_PORTS.join(', ')}; pass a base URL or set DSH_WEB_URL`
+    : `the given base URL ${namedBaseUrl} did not answer`);
 } else {
   const answer = await probe(baseUrl);
   check('the host answers HTTP', answer?.error === undefined, answer?.error ?? `HTTP ${String(answer?.status)} ${answer?.body ?? ''}`);
-  check('the request reached the trust fence (401/403) or the route itself (200)',
-    [200, 401, 403].includes(answer?.status),
+  // The probe carries no Origin, so the plugin's own route treats it as a
+  // native caller and answers 404 for the unknown session id — but only when
+  // the request got past the trust fence. A fence that did not authenticate it
+  // answers 401/403 instead. All of those are DSH answers; 404 in particular
+  // proves the route is mounted, which is what the printed guidance says.
+  check('the request was answered by the trust fence (401/403) or the mounted delete route (400/404/405)',
+    [400, 401, 403, 404, 405].includes(answer?.status),
     `HTTP ${String(answer?.status)} ${answer?.body ?? ''}`);
   console.log('');
   console.log('To check the authenticated route, run this in the Web UI console:');

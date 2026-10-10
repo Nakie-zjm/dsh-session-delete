@@ -40,7 +40,7 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "build:check": "node scripts/build-client.mjs --check",
-    "test": "node test/host-half.mjs && node test/browser-half.mjs",
+    "test": "node test/host-half.mjs && node test/browser-half.mjs && node test/deployment-check.mjs",
     "verify": "node test/verify-endpoint.mjs",
     "check": "npm run build:check && npm test",
     "prepublishOnly": "npm run check"
