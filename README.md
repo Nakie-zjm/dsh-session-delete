@@ -89,7 +89,8 @@ dsh plugin --profile desktop remove @nakie-zjm/dsh-session-delete
 2. **确认对话框**：显示会话标题和不可恢复的提示，取消不做任何写入；
 3. **确认后**：
    - 会话若还在跑回合：先经注册表自己的归档准入接缝（`archiveSession({stopActivity:true})`）
-     停掉这些工作并立刻收回归档标记，然后才继续；
+     停掉这些工作，并把借用的归档标记恢复原状（本来没归档就收回，本来就在归档集合里
+     就保留），然后才继续；
    - 从工作区记账中摘除（`Workspace.detachSession`，会持久化并推送变更）；
    - 从归档集合、置顶集合中摘除；
    - 永久删除会话日志目录与投影缓存文档；
@@ -104,7 +105,8 @@ dsh plugin --profile desktop remove @nakie-zjm/dsh-session-delete
 
 ```
 rename(会话目录 → ~/.dsh/sessions/.dsh-session-delete-<随机>/<会话id>/)   ← 同卷，原子
-  → 重新 lstat 校验身份（dev/ino/size/birthtimeNs 与改记账前一致）
+  → 重新 lstat 校验身份（dev/ino/birthtimeNs 与改记账前一致；目录 size 会随内容
+     变化，不算身份）
   → rm(隔离目录, recursive, force:false)
   → 再 stat 一次确认真的没了
 ```
@@ -119,24 +121,31 @@ rename(会话目录 → ~/.dsh/sessions/.dsh-session-delete-<随机>/<会话id>/
   只有后端答不出来时才退回本插件对布局的复刻（复刻有测试对着真实目录逐条核对）。
   后端答案必须满足 `<sessions根>/<项目目录>/<会话id>/transcript` 的形状，否则拒绝。
 - **符号链接防护**：删除前用 `lstat` + `realpath` 证明目标是真目录、父目录就是
-  `~/.dsh/sessions/` 下的项目目录、且解析后仍在 sessions 根内。指向别处就拒绝——
-  测试会造一个 junction 指向根外目录，断言拒绝并且目标文件完好无损。
+  `~/.dsh/sessions/` 下的项目目录、且解析后仍在 sessions 根内（harness home 本身
+  经符号链接 / junction 到达时两边都按解析后的路径比较，不会被误判成越界）。指向别处
+  就拒绝——测试会造一个 junction 指向根外目录，断言拒绝并且目标文件完好无损。
 - **拒绝不留副作用**：身份检查、位置检查、运行中检查都排在第一次持久化写入之前。
   任何拒绝之后，会话仍然在工作区原位、仍然在原有归档/置顶状态，日志一个字节没动。
 - **请求加固**：只接受 POST + `application/json`；浏览器请求必须同源且带
   `x-dsh-session-delete-confirmation: delete-session`（链接和 HTML 表单设不了自定义头，
-  所以跨站导航打不到这个分支）；会话 id 必须匹配 `[A-Za-z0-9_-]{1,128}`；请求体
-  先量后读，超过 8 KiB 直接 413。无 `Origin` 的原生调用方（CLI / Agent 直接 POST
-  loopback）由宿主信任栅栏认证，不需要那个头。
+  所以跨站导航打不到这个分支；同源判定是 Origin 与请求自身 Host 的主机名比对，
+  http 或 https 都算）；会话 id 必须匹配 `[A-Za-z0-9_-]{1,128}`；请求体先查
+  `content-length`、再核对读到的长度，超过 8 KiB 直接 413。无 `Origin` 的原生调用方
+  （CLI / Agent 直接 POST loopback）由宿主信任栅栏认证，不需要那个头。
 
 ### 已知边界
 
 - **正在运行的会话**：插件会先停掉它的回合再删。停不下来（宿主没提供归档准入接缝，
   或者停完仍是 live）才拒绝，返回 `session-delete/running`（HTTP 409），并且此时
-  一个文件都没动——但那个会话会处于「已归档」状态，需要去侧栏的「显示已归档」筛选里
+  一个文件都没动，归档状态也和删除前完全一样：本来没归档的仍然没归档，把它的工作
+  停掉再重试即可；本来就在归档集合里的会保持归档，需要先去侧栏的「显示已归档」筛选里
   取消归档再重试。当前正在对话的这个会话通常属于这一类（它始终 live）。
 - 会话的图片/文件附件是内容寻址的**全局**存储，其它会话可能共享，所以删除不动
   `~/.dsh/attachments`。这会留下孤儿字节，但不会误删别人的数据。
+- **清理中途失败**：工作区记账摘除之后，文件步骤（改名 / rm）仍可能失败。此时会话
+  已经不属于任何工作区（侧栏刷新后行会消失），磁盘上可能留下 `.dsh-session-delete-*`
+  隔离目录或投影缓存文档；错误信息会说明失败原因（已隔离的会给出隔离目录完整路径），
+  重试一次通常能删干净，也可以按路径手工清理。
 - `session_projcache` 的内存表保留该会话那一行直到重启；磁盘文档已删除，且没有
   日志的会话不会再被水合，所以不影响使用。
 - **删掉就没了**。要保留内容，请先用官方的 `/export` 命令导出一份 ZIP。
@@ -160,6 +169,7 @@ dsh-session-delete/
   test/host-half.mjs        宿主半端到端（临时 DSH_HOME，真删文件）
   test/browser-half.mjs     浏览器半（在 Node 里物化 lib/client.js，桩掉 React 与 fetch）
   test/verify-endpoint.mjs  对运行中的实例核对路径推导与可达性
+  test/deployment-check.mjs 对 verify-endpoint 的回归（桩宿主：404 已挂载 / 报错要说清 URL）
 ```
 
 宿主半不需要构建：DSH 的 Loader 用 `import` 加载它，`main` 直接指向 `src/index.js`。
@@ -171,7 +181,7 @@ dsh-session-delete/
 
 ```sh
 npm run build     # 生成 lib/client.js
-npm test          # 宿主半 51 项 + 浏览器半 46 项
+npm test          # 宿主半 75 项 + 浏览器半 47 项 + 部署检查 2 项
 npm run verify    # 对运行中的 DSH 实例核对（需应用在跑）
 npm run check     # build:check + test，prepublishOnly 会自动跑
 ```
@@ -239,35 +249,48 @@ in the session row's `…` menu. No hover button.
 Every check that can refuse — identity, location, and whether the session is
 running — runs before the first durable write, so a refusal leaves the session
 exactly as it was. Confirming then stops a running turn through the registry's own
-archive admission seam, detaches the session from its Workspace, drops it from the
-archive and pin sets, removes its log directory and projection cache, and emits
-`api-session/removed` so the browser list drops the row.
+archive admission seam (putting the borrowed archive marker back exactly as it
+was — cleared if it was not set, kept if it was), detaches the session from its
+Workspace, drops it from the archive and pin sets, removes its log directory and
+projection cache, and emits `api-session/removed` so the browser list drops the row.
 
 **There is no undo.** No trash, no backup. Export with `/export` first if you want
 to keep the transcript.
 
 The recursive removal is staged: the session directory is `rename`d into a
 quarantine directory beside its project directory, its identity (`dev`/`ino`/
-`size`/`birthtimeNs`) is re-checked there, and only then removed — so a failed
-removal can never leave a half-deleted tree where DSH would read it as a session.
+`birthtimeNs` — directory `size` changes with content, so it is not identity) is
+re-checked there, and only then removed — so a failed removal can never leave a
+half-deleted tree where DSH would read it as a session.
 
 ### Safety
 
 - The directory comes from `sessionPersistence.resolveCurrentLog(id)`; the plugin's
   own replica of the layout is only a fallback.
 - `lstat` + `realpath` prove the target is a real directory inside the sessions
-  root before anything is removed; a junction pointing outside is refused.
+  root before anything is removed; both sides of that comparison are resolved, so a
+  harness home reached through a symlink or junction is not mistaken for an escape,
+  while a junction pointing outside is still refused.
 - The route accepts POST + `application/json` only, requires a same-origin browser
-  request carrying `x-dsh-session-delete-confirmation`, pins the session id to
-  `[A-Za-z0-9_-]{1,128}`, and measures the body before parsing it.
+  request (Origin matching the request's own Host, over http or https) carrying
+  `x-dsh-session-delete-confirmation`, pins the session id to
+  `[A-Za-z0-9_-]{1,128}`, and checks the body length before parsing it.
 - Attachments under `~/.dsh/attachments` are content-addressed and shared, so they
   are never touched.
 
 ### Known limits
 
 - A session whose turn will not stop is refused with `session-delete/running`
-  (HTTP 409) and no file is touched; the session is left archived, so unarchive it
-  from the sidebar filter and retry.
+  (HTTP 409) and no file is touched. Its archive state is exactly what it was before
+  the attempt: one that was already archived stays archived (unarchive it from the
+  sidebar filter before retrying), and an unarchived one just needs its work stopped
+  before the retry.
+- **A failure mid-cleanup**: after the workspace accounting is removed, the file step
+  (rename / rm) can still fail. The session is no longer in any workspace (the row
+  disappears after a refresh) while a `.dsh-session-delete-*` quarantine directory or
+  the projection cache document may remain on disk; the error explains what failed
+  (naming the quarantine path when one was left), a retry usually finishes the
+  cleanup, and the leftover can also be removed by hand.
 - Cannot be installed alongside
   [`dsh-session-delete`](https://www.npmjs.com/package/dsh-session-delete) (vtxf's
   plugin): both register the same menu slot, so the menu would show two delete rows.
@@ -276,7 +299,7 @@ removal can never leave a half-deleted tree where DSH would read it as a session
 
 ```sh
 npm run build     # regenerate lib/client.js
-npm test          # host half (43 checks) + browser half (35 checks)
+npm test          # host half (75 checks) + browser half (47 checks) + deployment check (2)
 npm run check     # build:check + test — also runs on prepublishOnly
 ```
 
