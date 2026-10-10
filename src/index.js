@@ -46,7 +46,12 @@ const CONFIRMATION_HEADER = 'x-dsh-session-delete-confirmation';
 /** The confirmation header's required value. */
 const CONFIRMATION_VALUE = 'delete-session';
 
-/** Bound on the request body, read before parsing so a large post cannot buffer. */
+/**
+ * Bound on the request body. The connection layer buffers the body before the
+ * route sees it (`requestBody: 'buffered'`), so this is the size the route
+ * accepts: the declared length is checked first, then the read length, both
+ * before the body is parsed.
+ */
 const MAX_REQUEST_BYTES = 8 * 1024;
 
 /** Session ids are path segments when the layout is derived, so the shape is pinned. */
@@ -54,6 +59,7 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
 /** Http status the route answers for each typed refusal. */
 const STATUS_BY_CODE = {
+  'session-delete/bad-request': 400,
   'session-delete/not-found': 404,
   'session-delete/running': 409,
   'session-delete/unsafe-location': 409,
@@ -187,6 +193,24 @@ function inside(root, target) {
 }
 
 /**
+ * Canonicalize one path, reporting whether the filesystem could resolve it. A
+ * missing or unreadable leaf falls back to its lexical absolute path, so the
+ * caller can tell "resolved and somewhere else" apart from "nothing to
+ * resolve". Containment that mixes a resolved root with an unresolved target
+ * (or the reverse) reads a harness home reached through a symlink or junction
+ * as an escape, which is exactly the shape this avoids.
+ * @param path - the path to resolve.
+ * @returns the canonical or lexical path, plus whether resolution succeeded.
+ */
+async function canonicalPath(path) {
+  try {
+    return { path: await realpath(path), resolved: true };
+  } catch {
+    return { path: resolve(path), resolved: false };
+  }
+}
+
+/**
  * Ask the persistence backend where the Session's log actually is. The backend
  * owns its physical layout, so this is preferred over any derivation here and
  * keeps working when the format generation changes.
@@ -230,8 +254,13 @@ async function resolveArtifacts(handle, id, header) {
   if (fromBackend === undefined) return { sessionDir: derived, cacheFile, source: 'derived' };
   const root = resolve(SESSIONS_ROOT);
   const transcript = resolve(fromBackend);
-  const segments = relative(root, transcript).split(sep).filter(Boolean);
-  if (!isAbsolute(root) || !inside(root, transcript) || segments.length !== 3) {
+  const [rootInfo, transcriptInfo] = await Promise.all([canonicalPath(root), canonicalPath(transcript)]);
+  // Compare resolved paths when the backend's answer exists. A log that is not
+  // there yet can only be compared lexically, and the directory identity check
+  // below is what finally proves nothing outside the sessions root is removed.
+  const [from, to] = transcriptInfo.resolved ? [rootInfo.path, transcriptInfo.path] : [root, transcript];
+  const segments = relative(from, to).split(sep).filter(Boolean);
+  if (!isAbsolute(root) || !inside(from, to) || segments.length !== 3) {
     throw refuse('session-delete/unsafe-location', `session '${id}' resolves outside the configured sessions root; nothing was deleted`);
   }
   return { sessionDir: join(root, segments[0], segments[1]), cacheFile, source: 'backend' };
@@ -249,11 +278,19 @@ async function ownedDirectoryIdentity(sessionDir) {
   try {
     const entry = await lstat(sessionDir, { bigint: true });
     if (entry.isSymbolicLink() || !entry.isDirectory()) return undefined;
-    const [real, parent] = await Promise.all([realpath(sessionDir), realpath(dirname(sessionDir))]);
+    const [real, parent, root] = await Promise.all([
+      realpath(sessionDir),
+      realpath(dirname(sessionDir)),
+      canonicalPath(SESSIONS_ROOT),
+    ]);
     // A junction anywhere in the chain would make the recursive remove leave
-    // the sessions root, so the real parent must be the real project directory.
-    if (dirname(real) !== parent || !inside(resolve(SESSIONS_ROOT), real)) return undefined;
-    return { dev: entry.dev, ino: entry.ino, size: entry.size, birthtimeNs: entry.birthtimeNs };
+    // the sessions root, so the real parent must be the real project directory
+    // and the real directory must sit inside the REAL sessions root. Both sides
+    // are resolved: the configured home itself may be reached through a symlink
+    // or junction, and comparing a resolved target against an unresolved root
+    // would refuse every delete on such a machine.
+    if (dirname(real) !== parent || !inside(root.path, real)) return undefined;
+    return { dev: entry.dev, ino: entry.ino, birthtimeNs: entry.birthtimeNs };
   } catch (error) {
     if (error.code === 'ENOENT') return {};
     return undefined;
@@ -263,6 +300,8 @@ async function ownedDirectoryIdentity(sessionDir) {
 /**
  * Whether two `lstat` identities describe the same object. Used to prove the
  * quarantined directory is the one this delete staged, not a replacement.
+ * `dev`, `ino` and `birthtimeNs` are the identity; directory `size` is content
+ * metadata that changes as a Session settles, so it must not decide identity.
  * @param before - the identity captured before the move.
  * @param after - the identity captured after it.
  * @returns true when every recorded field matches.
@@ -270,7 +309,6 @@ async function ownedDirectoryIdentity(sessionDir) {
 function sameIdentity(before, after) {
   return before.dev === after.dev
     && before.ino === after.ino
-    && before.size === after.size
     && before.birthtimeNs === after.birthtimeNs;
 }
 
@@ -362,31 +400,60 @@ function isRunning(handle, id) {
 }
 
 /**
+ * Whether the registry currently holds this Session in its archive set. Read
+ * defensively: a deployment whose registry state is not initialized must not
+ * turn a delete into a crash, and an unknown state only costs the refusal
+ * message its extra sentence.
+ * @param handle - the resolved services.
+ * @param id - the Session id.
+ * @returns true when the archive marker is set.
+ */
+function isArchived(handle, id) {
+  try {
+    return handle.registry?.archivedSessionIds?.includes(id) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve one Session and refuse a definite miss: the live store first, then a
  * fresh persistence listing, then the header index the registry maintains.
  * @param handle - the resolved services.
  * @param id - the Session id.
+ * @param report - collector for non-fatal problems.
  * @returns the Session's header.
  * @throws {SessionDeleteError} `session-delete/not-found` for a definite miss.
  */
-async function resolveHeader(handle, id) {
+async function resolveHeader(handle, id, report) {
   const live = handle.sessions?.get(id);
   if (live !== undefined) return live.header;
+  let listingFailed = false;
   if (handle.persistence !== undefined) {
-    const snapshot = (await handle.persistence.list()).find((entry) => entry.header.id === id);
-    if (snapshot !== undefined) return snapshot.header;
+    try {
+      const snapshot = (await handle.persistence.list()).find((entry) => entry.header.id === id);
+      if (snapshot !== undefined) return snapshot.header;
+    } catch (error) {
+      // A corrupt or unreadable listing must not make an otherwise resolvable
+      // Session undeletable: the registry index below is the next fallback.
+      listingFailed = true;
+      report.push(`listing session persistence failed: ${messageOf(error)}; falling back to the workspace registry`);
+    }
   }
   const indexed = handle.registry?.list?.().find((workspace) => workspace.sessionIds.includes(id));
   if (indexed !== undefined) return { id, cwd: indexed.path };
-  throw refuse('session-delete/not-found', `session '${id}' is not live and session persistence holds no such session`);
+  throw refuse('session-delete/not-found', listingFailed
+    ? `session '${id}' is not live, session persistence could not be listed, and the workspace registry does not account for it`
+    : `session '${id}' is not live and session persistence holds no such session`);
 }
 
 /**
  * Stop a running Session's work through the registry's own archive admission
  * seam — the same stop the "stop and archive" confirmation uses — and then put
- * the archive marker straight back. Nothing else about the Session changes, so
- * this is a safe way to make a live Session deletable without reaching into the
- * store's private teardown path.
+ * the archive marker back exactly as it was: cleared when this delete borrowed
+ * it, kept when the Session was already archived. Nothing else about the
+ * Session changes, so this is a safe way to make a live Session deletable
+ * without reaching into the store's private teardown path.
  * @param handle - the resolved services.
  * @param id - the Session id.
  * @param report - collector for non-fatal problems.
@@ -398,18 +465,21 @@ async function stopRunningWork(handle, id, report) {
     report.push('the workspace registry exposes no stop seam');
     return false;
   }
+  const wasArchived = isArchived(handle, id);
   try {
     await registry.archiveSession(id, { stopActivity: true });
   } catch (error) {
     report.push(`stopping the running turn failed: ${messageOf(error)}`);
     return false;
   }
-  try {
-    await registry.unarchiveSession(id);
-  } catch (error) {
-    // The archive marker is reconciled again at the end of the delete, so a
-    // failure here is reported and not fatal.
-    report.push(`clearing the temporary archive marker failed: ${messageOf(error)}`);
+  if (!wasArchived) {
+    try {
+      await registry.unarchiveSession(id);
+    } catch (error) {
+      // The archive marker is reconciled again at the end of the delete, so a
+      // failure here is reported and not fatal.
+      report.push(`clearing the temporary archive marker failed: ${messageOf(error)}`);
+    }
   }
   return true;
 }
@@ -418,8 +488,8 @@ async function stopRunningWork(handle, id, report) {
  * Drop the Session from durable Workspace accounting and from the
  * registry-global archive and pin sets. Membership is removed through the
  * entity's own write path, which also stamps the Workspace and publishes the
- * change the browser sidebar follows; the archive and pin sets are filtered
- * through the registry's serialized operation queue.
+ * change the browser sidebar follows; the archive and pin sets are dropped
+ * through the registry's own unarchive and unpin operations.
  * @param handle - the resolved services.
  * @param id - the Session id.
  * @param report - collector for non-fatal problems.
@@ -452,8 +522,9 @@ async function unaccount(handle, id, report) {
  *
  * The directory is the one artifact that can hold anything else the Session
  * owns, so it goes through the quarantine path with a re-checked identity. The
- * checkpoint is a single file this plugin names itself under a root it owns, so
- * removing it cannot follow a link out of that root.
+ * checkpoint is a single file this plugin names itself, so removing it unlinks
+ * exactly that one name: a symlink placed at the checkpoint path is removed,
+ * never followed.
  * @param sessionDir - the validated Session directory.
  * @param cacheFile - the projection checkpoint path.
  * @param identity - the directory identity captured before any accounting change.
@@ -486,24 +557,27 @@ async function discardArtifacts(sessionDir, cacheFile, identity) {
 export async function deleteSession(ctx, options) {
   const id = options.sessionId;
   if (!SESSION_ID_PATTERN.test(id)) {
-    throw refuse('session-delete/internal', 'sessionId must match [A-Za-z0-9_-]{1,128}');
+    throw refuse('session-delete/bad-request', 'sessionId must match [A-Za-z0-9_-]{1,128}');
   }
   const handle = services(ctx);
   if (handle.sessions === undefined && handle.persistence === undefined) {
     throw refuse('session-delete/internal', 'session delete is unavailable: the deployment mounts neither a Session store nor session persistence');
   }
-  const header = await resolveHeader(handle, id);
+  const warnings = [];
+  const header = await resolveHeader(handle, id, warnings);
   const artifacts = await resolveArtifacts(handle, id, header);
   const candidate = await ownedDirectoryIdentity(artifacts.sessionDir);
   if (candidate === undefined) {
     throw refuse('session-delete/unsafe-location', `session '${id}': its directory is a symlink or leaves the sessions root; nothing was removed`);
   }
-  const warnings = [];
   const wasRunning = isRunning(handle, id);
   if (wasRunning && options.modifyOnly !== true) {
     await stopRunningWork(handle, id, warnings);
     if (isRunning(handle, id)) {
-      throw refuse('session-delete/running', `session '${id}' is still live after its turn was stopped: no files were deleted, and the session is now archived — unarchive it from the sidebar filter and retry once its turn has settled`);
+      const archived = isArchived(handle, id);
+      throw refuse('session-delete/running', archived
+        ? `session '${id}' is still live and could not be stopped: no files were deleted, and it is still archived — unarchive it from the sidebar filter, then retry once its turn has settled`
+        : `session '${id}' is still live and could not be stopped: no files were deleted; stop its work from the sidebar, then retry once its turn has settled`);
     }
   } else if (wasRunning) {
     warnings.push('the session is running: confirming will stop its turn before deleting');
@@ -541,12 +615,46 @@ export async function deleteSession(ctx, options) {
 }
 
 /**
+ * Whether one browser Origin header names the same host as the request's own
+ * Host header. The scheme is deliberately not compared: a DSH Web instance can
+ * be served over https through a proxy while the request's internal Host is
+ * unchanged, and refusing that same-origin call would break the confirmation
+ * for the whole deployment. What matters here is that the request came from a
+ * page served by this host, not from another site — the Host's own trust fence
+ * remains the primary authority gate, and the confirmation header still rules
+ * out a navigation-driven request.
+ * @param origin - the Origin header value.
+ * @param host - the Host header value.
+ * @returns true when the two name the same host.
+ */
+function sameOrigin(origin, host) {
+  if (host === null || host === '') return false;
+  let fromBrowser;
+  try {
+    fromBrowser = new URL(origin);
+  } catch {
+    return false;
+  }
+  // A real Origin header is exactly an origin: no path, query, credentials or
+  // trailing slash, and never an opaque value (which `new URL` rejects above).
+  if (fromBrowser.origin !== origin) return false;
+  if (fromBrowser.protocol !== 'http:' && fromBrowser.protocol !== 'https:') return false;
+  let served;
+  try {
+    served = new URL(`${fromBrowser.protocol}//${host}`);
+  } catch {
+    return false;
+  }
+  return fromBrowser.host === served.host;
+}
+
+/**
  * Answer one browser request to the delete route.
  *
  * The checks run in the order a browser can defeat them: method, media type,
  * the confirmation header (which only script can set), then the body. The body
- * is measured before it is parsed, so an oversized post is refused instead of
- * buffered.
+ * size is checked against the declared length and again after reading, before
+ * parsing; the connection layer has already buffered it either way.
  * @param ctx - the composed host context.
  * @param request - the browser request.
  * @returns the JSON response.
@@ -562,8 +670,7 @@ export async function sessionDeleteResponse(ctx, request) {
     // case where the deployment widened its trusted authorities, and the
     // confirmation header (which no form or link can set) rules out a
     // navigation-driven request.
-    const host = request.headers.get('host');
-    if (host === null || origin !== `http://${host}` || request.headers.get(CONFIRMATION_HEADER) !== CONFIRMATION_VALUE) {
+    if (!sameOrigin(origin, request.headers.get('host')) || request.headers.get(CONFIRMATION_HEADER) !== CONFIRMATION_VALUE) {
       return json({ error: `a browser request must be same-origin and send ${CONFIRMATION_HEADER}: ${CONFIRMATION_VALUE}` }, 403);
     }
   }

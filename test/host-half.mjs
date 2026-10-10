@@ -13,7 +13,7 @@
  * @module dsh-session-delete/test/host-half
  */
 
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -80,8 +80,9 @@ function quarantineLeftovers() {
  * @param options.running - whether the fake Agent reports a running turn.
  * @param options.live - whether the fake Session store also holds the Session.
  * @param options.stubborn - a running Agent that does not stop when asked.
+ * @param options.archived - whether the Session starts in the archive set (default true).
  * @param options.logPath - a backend answer for the Session's log path.
- * @param options.symlinkDir - make the derived Session directory a symlink.
+ * @param options.listThrows - make the persistence listing fail.
  * @returns the context, the recorder, and the header.
  */
 function makeContext(options = {}) {
@@ -98,19 +99,8 @@ function makeContext(options = {}) {
     },
   };
   const registry = {
-    archivedSessionIds: [SESSION_ID],
+    archivedSessionIds: options.archived === false ? [] : [SESSION_ID],
     pinnedSessionIds: [SESSION_ID],
-    enqueueOperation: async (operation) => operation(),
-    setState: async (state) => {
-      registry.archivedSessionIds = state.archivedSessionIds;
-      registry.pinnedSessionIds = state.pinnedSessionIds;
-    },
-    requireState: () => ({
-      initialized: true,
-      workspaceIds: ['ws-1'],
-      archivedSessionIds: registry.archivedSessionIds,
-      pinnedSessionIds: registry.pinnedSessionIds,
-    }),
     list: () => [workspace],
     archiveSession: async (id, archiveOptions) => {
       calls.archived.push({ id, stopActivity: archiveOptions?.stopActivity === true });
@@ -127,7 +117,9 @@ function makeContext(options = {}) {
     },
   };
   const persistence = {
-    list: async () => [{ header, revision: 'r1', sizeBytes: 11 }],
+    list: options.listThrows === true
+      ? async () => { throw new Error('persistence listing unavailable'); }
+      : async () => [{ header, revision: 'r1', sizeBytes: 11 }],
     ...(options.logPath === undefined ? {} : { resolveCurrentLog: async () => options.logPath }),
   };
   const ctx = {
@@ -186,7 +178,7 @@ seedArtifacts();
 
 {
   seedArtifacts();
-  const { ctx, calls } = makeContext({ running: true, stubborn: true });
+  const { ctx, calls, registry } = makeContext({ running: true, stubborn: true });
   let refusal;
   try {
     await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
@@ -196,10 +188,37 @@ seedArtifacts();
   check('a Session that will not stop is refused', refusal?.code === 'session-delete/running', String(refusal?.code));
   check('a refused delete leaves the workspace slot alone', calls.detached.length === 0);
   check('a refused delete leaves the log directory in place', existsSync(logDir));
-  // The stop itself borrows the archive marker, so this refusal reports that
-  // state instead of claiming the session is untouched.
   check('a refused delete reports no files were deleted', String(refusal?.message).includes('no files were deleted'), String(refusal?.message));
-  check('a refused delete names the borrowed archive marker', String(refusal?.message).includes('archived'), String(refusal?.message));
+  // The Session started archived, and the stop seam must not silently clear
+  // that marker: the refusal still names it because it is still there.
+  check('a refused delete keeps the archive state it started with',
+    registry.archivedSessionIds.includes(SESSION_ID),
+    JSON.stringify(registry.archivedSessionIds));
+  check('a refused delete names the archive marker it kept', String(refusal?.message).includes('archived'), String(refusal?.message));
+}
+
+{
+  // The ordinary case: the Session is live but not archived, so the marker was
+  // borrowed and has to be given back. The refusal must not send the operator
+  // looking for an archived row that does not exist.
+  seedArtifacts();
+  const { ctx, calls, registry } = makeContext({ running: true, stubborn: true, archived: false });
+  let refusal;
+  try {
+    await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
+  } catch (error) {
+    refusal = error;
+  }
+  check('a refused delete leaves an unarchived Session unarchived',
+    !registry.archivedSessionIds.includes(SESSION_ID),
+    JSON.stringify(registry.archivedSessionIds));
+  check('the ordinary refusal does not tell the operator to unarchive anything',
+    !String(refusal?.message).includes('unarchive'),
+    String(refusal?.message));
+  check('the ordinary refusal still reports that no files were deleted',
+    String(refusal?.message).includes('no files were deleted'),
+    String(refusal?.message));
+  check('the ordinary refusal leaves the workspace slot alone', calls.detached.length === 0);
 }
 
 // ── 3. the real delete ────────────────────────────────────────────────────
@@ -247,6 +266,55 @@ ensureArtifacts();
   rmSync(logDir, { recursive: true, force: true });
 }
 
+// ── 3c. a harness home reached through a link still deletes ───────────────
+
+{
+  // Moving a harness home to another volume and leaving a junction (or a
+  // symlink) behind is a normal setup. The containment check must compare
+  // resolved paths on both sides, or every delete on such a machine is refused
+  // as if the Session directory had escaped the sessions root.
+  const linkContainer = mkdtempSync(join(tmpdir(), 'dsh-session-delete-link-'));
+  const realHome = join(linkContainer, 'real-home');
+  const linkedHome = join(linkContainer, 'linked-home');
+  mkdirSync(realHome, { recursive: true });
+  symlinkSync(realHome, linkedHome, 'junction');
+  const previousHome = process.env['DSH_HOME'];
+  let linked;
+  try {
+    process.env['DSH_HOME'] = linkedHome;
+    // A fresh module instance: this plugin resolves its roots at import time.
+    linked = await import(`${pathToFileURL(join(here, '..', 'src', 'index.js')).href}?linked-home`);
+  } finally {
+    if (previousHome === undefined) delete process.env['DSH_HOME'];
+    else process.env['DSH_HOME'] = previousHome;
+  }
+  const linkedDir = linked.sessionDirOf(CWD, SESSION_ID);
+  const linkedCache = join(linked.PROJ_CACHE_ROOT, `${linked.encodeSegment(SESSION_ID)}.json`);
+  mkdirSync(linkedDir, { recursive: true });
+  writeFileSync(join(linkedDir, 'session.v4.jsonl.zstd'), 'fixture-log');
+  mkdirSync(linked.PROJ_CACHE_ROOT, { recursive: true });
+  writeFileSync(linkedCache, '{"fixture":true}');
+
+  const derived = makeContext();
+  const outcome = await linked.deleteSession(derived.ctx, { sessionId: SESSION_ID });
+  check('a Session under a linked harness home is deleted, not refused as an escape',
+    outcome.paths[0] === linkedDir && !existsSync(linkedDir) && !existsSync(linkedCache),
+    JSON.stringify(outcome.paths));
+  check('the linked-home delete unaccounted the Session', derived.calls.detached.includes(SESSION_ID));
+
+  // A backend that answers with the link already resolved must be accepted for
+  // the same reason: it names the same artifact, not an escape.
+  mkdirSync(linkedDir, { recursive: true });
+  writeFileSync(join(linkedDir, 'session.v4.jsonl.zstd'), 'fixture-log');
+  const resolvedLog = join(realpathSync(linkedDir), 'session.v4.jsonl.zstd');
+  const viaBackend = makeContext({ logPath: resolvedLog });
+  const backendOutcome = await linked.deleteSession(viaBackend.ctx, { sessionId: SESSION_ID });
+  check('a backend answer in resolved form still deletes through the linked home',
+    backendOutcome.locationSource === 'backend' && !existsSync(linkedDir),
+    `${backendOutcome.locationSource} ${JSON.stringify(backendOutcome.paths)}`);
+  rmSync(linkContainer, { recursive: true, force: true });
+}
+
 // ── 4. unknown and missing artifacts ─────────────────────────────────────
 
 {
@@ -268,6 +336,101 @@ ensureArtifacts();
   const { ctx } = makeContext();
   const outcome = await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
   check('deleting again is idempotent for missing artifacts', outcome.paths.length === 2 && !existsSync(logDir));
+}
+
+// ── 4b. the backend's log answer drives the target, or is refused ─────────
+
+{
+  seedArtifacts();
+  const { ctx } = makeContext({ logPath: join(logDir, 'session.v4.jsonl.zstd') });
+  const outcome = await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
+  check('a backend answer inside the sessions root is used for the directory',
+    outcome.locationSource === 'backend' && outcome.paths[0] === logDir,
+    `${outcome.locationSource} ${JSON.stringify(outcome.paths)}`);
+  check('the backend-answered directory is removed', !existsSync(logDir) && !existsSync(cacheFile));
+}
+
+{
+  seedArtifacts();
+  // Exactly three relative segments outside the root, so only the containment
+  // comparison — not the shape check — can refuse this answer.
+  const escapeDir = join(home, 'backend-escape');
+  const escapeLog = join(escapeDir, 'session.v4.jsonl.zstd');
+  mkdirSync(escapeDir, { recursive: true });
+  writeFileSync(escapeLog, 'must survive');
+  const { ctx, calls } = makeContext({ logPath: escapeLog });
+  let refusal;
+  try {
+    await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
+  } catch (error) {
+    refusal = error;
+  }
+  check('a backend answer outside the sessions root is refused',
+    refusal?.code === 'session-delete/unsafe-location',
+    String(refusal?.code));
+  check('the outside answer is refused before any accounting change', calls.detached.length === 0);
+  check('the tree the backend named survives untouched', existsSync(escapeLog));
+  check('the Session artifacts survive the refusal', existsSync(logDir) && existsSync(cacheFile));
+}
+
+// ── 4c. a directory swapped mid-delete is put back ───────────────────────
+
+{
+  seedArtifacts();
+  const { ctx, calls, workspace } = makeContext();
+  const detach = workspace.detachSession;
+  workspace.detachSession = async (id) => {
+    await detach(id);
+    // Replace the directory in the window between the identity capture and the
+    // quarantine move: the re-check must refuse and put the replacement back.
+    rmSync(logDir, { recursive: true, force: true });
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, 'replacement.txt'), 'must survive');
+  };
+  let refusal;
+  try {
+    await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
+  } catch (error) {
+    refusal = error;
+  }
+  check('a directory swapped mid-delete is refused as unsafe-location',
+    refusal?.code === 'session-delete/unsafe-location',
+    String(refusal?.code));
+  check('the swapped directory is put back in place', existsSync(join(logDir, 'replacement.txt')));
+  check('the swap refusal removed no artifact', existsSync(cacheFile));
+  check('the swap left no quarantine behind',
+    quarantineLeftovers().length === 0,
+    JSON.stringify(quarantineLeftovers()));
+  check('the browser was told nothing about the refused swap', calls.emitted.length === 0);
+}
+
+// ── 4d. an unreadable persistence listing falls back to the registry ──────
+
+{
+  seedArtifacts();
+  const { ctx } = makeContext({ listThrows: true });
+  const outcome = await plugin.deleteSession(ctx, { sessionId: SESSION_ID });
+  check('a failing persistence listing falls back to the registry index',
+    outcome.cwd === CWD && !existsSync(logDir),
+    `${String(outcome.cwd)} ${JSON.stringify(outcome.paths)}`);
+  check('the fallback records why persistence was skipped',
+    outcome.warnings.some((warning) => warning.includes('persistence')),
+    JSON.stringify(outcome.warnings));
+}
+
+// ── 4e. a malformed id is a bad request even from a direct caller ─────────
+
+{
+  const { ctx } = makeContext();
+  let refusal;
+  try {
+    await plugin.deleteSession(ctx, { sessionId: '../etc/passwd' });
+  } catch (error) {
+    refusal = error;
+  }
+  check('a malformed id is refused as a bad request, not an internal error',
+    refusal?.code === 'session-delete/bad-request' && refusal?.status === 400,
+    `${String(refusal?.code)} HTTP ${String(refusal?.status)}`);
 }
 
 // ── 5. the HTTP envelope ─────────────────────────────────────────────────
@@ -330,13 +493,35 @@ const BROWSER_ORIGIN = 'http://127.0.0.1:19387';
   }));
   check('a cross-site Origin is refused with 403', crossSite.status === 403, `HTTP ${String(crossSite.status)}`);
 
-  const spoofedHost = await plugin.sessionDeleteResponse(makeContext().ctx, requestOf({
+  // A Web instance served over https through a proxy is still same-origin: the
+  // Origin names the host the request was sent to, and the Host's own fence has
+  // the final say on which authorities exist.
+  const secureSameOrigin = await plugin.sessionDeleteResponse(makeContext().ctx, requestOf({
     body: JSON.stringify({ sessionId: SESSION_ID, modifyOnly: true }),
     contentType: 'application/json',
-    origin: 'https://evil.example',
+    origin: 'https://127.0.0.1:19387',
+    host: '127.0.0.1:19387',
     confirmation: 'delete-session',
   }));
-  check('an Origin matching only its own Host header is refused with 403', spoofedHost.status === 403, `HTTP ${String(spoofedHost.status)}`);
+  check('a same-origin https browser request is admitted', secureSameOrigin.status === 200, `HTTP ${String(secureSameOrigin.status)}`);
+
+  const opaqueOrigin = await plugin.sessionDeleteResponse(makeContext().ctx, requestOf({
+    body: JSON.stringify({ sessionId: SESSION_ID, modifyOnly: true }),
+    contentType: 'application/json',
+    origin: 'null',
+    host: '127.0.0.1:19387',
+    confirmation: 'delete-session',
+  }));
+  check('an opaque Origin is refused with 403', opaqueOrigin.status === 403, `HTTP ${String(opaqueOrigin.status)}`);
+
+  const pathOrigin = await plugin.sessionDeleteResponse(makeContext().ctx, requestOf({
+    body: JSON.stringify({ sessionId: SESSION_ID, modifyOnly: true }),
+    contentType: 'application/json',
+    origin: 'https://127.0.0.1:19387/steal',
+    host: '127.0.0.1:19387',
+    confirmation: 'delete-session',
+  }));
+  check('an Origin carrying anything but an origin is refused with 403', pathOrigin.status === 403, `HTTP ${String(pathOrigin.status)}`);
 
   const wrongType = await plugin.sessionDeleteResponse(makeContext().ctx, requestOf({
     body: JSON.stringify({ sessionId: SESSION_ID }),
