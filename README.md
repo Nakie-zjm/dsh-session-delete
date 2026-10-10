@@ -22,7 +22,7 @@ DSH 只提供「归档」：会话日志是 append-only 的，`dsh-session-persi
 2. 在「添加插件」里填入包名和版本：
 
 ```
-@nakie-zjm/dsh-session-delete@0.1.0
+@nakie-zjm/dsh-session-delete@0.1.1
 ```
 
 3. 按页面结果操作。**桌面版需要完全退出并重启应用**——bundle 选择是启动时读取的，
@@ -34,8 +34,8 @@ DSH 只提供「归档」：会话日志是 append-only 的，`dsh-session-persi
 #### 方式二：`dsh plugin` 命令行
 
 ```sh
-dsh plugin --profile desktop add @nakie-zjm/dsh-session-delete@0.1.0
-dsh plugin --profile web     add @nakie-zjm/dsh-session-delete@0.1.0
+dsh plugin --profile desktop add @nakie-zjm/dsh-session-delete@0.1.1
+dsh plugin --profile web     add @nakie-zjm/dsh-session-delete@0.1.1
 ```
 
 官方桌面版的 `dsh` 命令默认不在 `PATH` 里，需要先在应用里注册自带的命令
@@ -46,14 +46,14 @@ dsh plugin --profile web     add @nakie-zjm/dsh-session-delete@0.1.0
 
 ```sh
 cd ~/.dsh/profiles/desktop          # 或你的 profile 目录
-pnpm add @nakie-zjm/dsh-session-delete@0.1.0
+pnpm add @nakie-zjm/dsh-session-delete@0.1.1
 ```
 
 然后在 `~/.dsh/profiles/desktop/package.json` 里确认两处（安装器正常情况下会自己写）：
 
 ```jsonc
 {
-  "dependencies": { "@nakie-zjm/dsh-session-delete": "0.1.0" },
+  "dependencies": { "@nakie-zjm/dsh-session-delete": "0.1.1" },
   "dsh": { "profile": { "bundles": [ /* …, */ "@nakie-zjm/dsh-session-delete" ] } }
 }
 ```
@@ -216,7 +216,7 @@ the sidebar session row's `…` menu.
 Package name: **`@nakie-zjm/dsh-session-delete`**
 
 **Plugins page (recommended):** open DSH → **Plugins**, then add
-`@nakie-zjm/dsh-session-delete@0.1.0`. The installer adds the profile dependency,
+`@nakie-zjm/dsh-session-delete@0.1.1`. The installer adds the profile dependency,
 selects the bundle in `dsh.profile.bundles`, and the package's own
 `cordis.patch.yml` applies as a layer — no configuration file is edited by hand.
 **Desktop requires a full app restart**, because bundle selection is read at startup.
@@ -224,8 +224,8 @@ selects the bundle in `dsh.profile.bundles`, and the package's own
 **CLI:**
 
 ```sh
-dsh plugin --profile desktop add @nakie-zjm/dsh-session-delete@0.1.0
-dsh plugin --profile web     add @nakie-zjm/dsh-session-delete@0.1.0
+dsh plugin --profile desktop add @nakie-zjm/dsh-session-delete@0.1.1
+dsh plugin --profile web     add @nakie-zjm/dsh-session-delete@0.1.1
 ```
 
 The official Desktop build does not put `dsh` on `PATH`; register the bundled
@@ -233,7 +233,7 @@ command first (**Manage dsh Command…** in the app menu) and use the `desktop`
 profile after fully quitting the app.
 
 **Manual fallback:** in `~/.dsh/profiles/<profile>`, run
-`pnpm add @nakie-zjm/dsh-session-delete@0.1.0`, then confirm the name appears in
+`pnpm add @nakie-zjm/dsh-session-delete@0.1.1`, then confirm the name appears in
 both `dependencies` and `dsh.profile.bundles` of that profile's `package.json`.
 
 **Uninstall:** `dsh plugin --profile desktop remove @nakie-zjm/dsh-session-delete`,

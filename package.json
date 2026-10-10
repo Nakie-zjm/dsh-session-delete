@@ -1,6 +1,6 @@
 {
   "name": "@nakie-zjm/dsh-session-delete",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Permanent session delete for DeepSeek Harness: one sidebar menu action that removes the Session log and projection cache and unaccounts it from its Workspace",
   "keywords": [
     "dsh-plugin",
